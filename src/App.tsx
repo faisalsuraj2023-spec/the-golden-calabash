@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { supabase, supabaseReady } from "./supabase";
+import AdminDashboard from "./AdminDashboard";
 import {
   ShoppingBag,
   Utensils,
@@ -663,65 +664,10 @@ export default function App() {
             <ShieldCheck size={14} /> RESTAURANT MANAGEMENT
           </p>
           <h1 className="page-title">Admin dashboard</h1>
-
           {!isAdmin ? (
-            <p className="muted">
-              This account does not have administrator access.
-            </p>
+            <p className="muted">This account does not have administrator access.</p>
           ) : (
-            <>
-              <div className="stats">
-                <div className="panel">
-                  <ClipboardList />
-                  <b>{orders.length}</b>
-                  <span>Recent orders</span>
-                </div>
-                <div className="panel">
-                  <ChefHat />
-                  <b>{products.length}</b>
-                  <span>Menu items</span>
-                </div>
-              </div>
-
-              <h2 className="section-heading">Order management</h2>
-
-              {orders.map(order => (
-                <div className="panel admin-order" key={order.id}>
-                  <div>
-                    <b>#{order.id.slice(0, 8)}</b>
-                    <p>{order.customer_name || "Customer"}</p>
-                    <p>
-                      {money(Number(order.total))} ·{" "}
-                      {order.payment_method?.replace(/_/g, " ")}
-                    </p>
-                    <span className="status">
-                      {order.order_status?.replace(/_/g, " ")}
-                    </span>
-                  </div>
-
-                  <div className="status-actions">
-                    <button onClick={() => updateStatus(order.id, "approved")}>
-                      Approve
-                    </button>
-                    <button onClick={() => updateStatus(order.id, "preparing")}>
-                      Preparing
-                    </button>
-                    <button onClick={() => updateStatus(order.id, "ready")}>
-                      Ready
-                    </button>
-                    <button onClick={() => updateStatus(order.id, "out_for_delivery")}>
-                      Dispatch
-                    </button>
-                    <button onClick={() => updateStatus(order.id, "delivered")}>
-                      Delivered
-                    </button>
-                    <button onClick={() => updateStatus(order.id, "rejected")}>
-                      Reject
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </>
+            <AdminDashboard userId={user.id} productCount={products.length} />
           )}
         </main>
       )}
