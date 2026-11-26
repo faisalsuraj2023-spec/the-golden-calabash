@@ -213,38 +213,59 @@ export default function App() {
 
   async function submitAuth(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    setBusy(true);
-    setMessage("");
 
-    const result =
-      authMode === "signup"
-        ? await supabase.auth.signUp({
-            email: auth.email,
-            password: auth.password,
-            options: {
-              data: { full_name: auth.name },
-              emailRedirectTo: `${window.location.origin}/`
-            }
-          })
-        : await supabase.auth.signInWithPassword({
-            email: auth.email,
-            password: auth.password
-          });
-
-    setBusy(false);
-
-    if (result.error) {
-      setMessage(result.error.message);
+    if (!supabaseReady) {
+      setMessage("Supabase is not connected. Please try again later.");
       return;
     }
 
-    if (authMode === "signup") {
+    setBusy(true);
+    setMessage("");
+
+    try {
+      const result =
+        authMode === "signup"
+          ? await supabase.auth.signUp({
+              email: auth.email,
+              password: auth.password,
+              options: {
+                data: { full_name: auth.name },
+                emailRedirectTo: `${window.location.origin}/`
+              }
+            })
+          : await supabase.auth.signInWithPassword({
+              email: auth.email,
+              password: auth.password
+            });
+
+      if (result.error) {
+        setMessage(result.error.message);
+        return;
+      }
+
+      if (authMode === "signup") {
+        if (result.data.session) {
+          setUser(result.data.session.user);
+          setMessage("Your account has been created successfully.");
+        } else {
+          setMessage(
+            "Account created. Please check your email and confirm your account. Then sign in to continue ordering."
+          );
+          setAuthMode("login");
+        }
+      } else {
+        setUser(result.data.user);
+        setMessage("Signed in successfully. You can now place your order.");
+        setPage("account");
+      }
+    } catch (error) {
       setMessage(
-        "Account created. Please check your email for the confirmation link."
+        error instanceof Error
+          ? error.message
+          : "Something went wrong. Please try again."
       );
-    } else {
-      setMessage("Signed in successfully.");
-      setPage("account");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -252,89 +273,116 @@ export default function App() {
     e.preventDefault();
 
     if (!user) {
-      setMessage("Please sign in or create an account before checkout.");
+      setMessage("Please create an account or sign in before placing an order.");
+      setAuthMode("signup");
+      setCartOpen(false);
       setPage("account");
       return;
     }
 
     if (!cart.length) {
-      setMessage("Your bag is empty.");
+      setMessage("Your bag is empty. Please add food before checkout.");
+      return;
+    }
+
+    if (!checkout.name.trim() || !checkout.phone.trim() || !checkout.address.trim()) {
+      setMessage("Please complete your name, phone number and delivery address.");
+      return;
+    }
+
+    if (!supabaseReady) {
+      setMessage("The ordering service is not connected. Please try again later.");
       return;
     }
 
     setBusy(true);
     setMessage("");
 
-    const items = cart.map(item => ({
-      product_id: item.product.id,
-      quantity: item.quantity
-    }));
+    try {
+      const items = cart.map(item => ({
+        product_id: item.product.id,
+        quantity: item.quantity
+      }));
 
-    const { data, error } = await supabase.rpc(
-      "create_restaurant_order",
-      {
-        p_customer_name: checkout.name,
-        p_customer_phone: checkout.phone,
-        p_delivery_address: { address: checkout.address },
-        p_items: items,
-        p_payment_method: checkout.method,
-        p_customer_note: checkout.note || null
-      }
-    );
-
-    if (error) {
-      setMessage("Order could not be submitted: " + error.message);
-      setBusy(false);
-      return;
-    }
-
-    const orderId =
-      typeof data === "string"
-        ? data
-        : data?.order_id || data?.id;
-
-    let receiptMessage = "";
-
-    if (checkout.method === "bank_transfer" && receipt && orderId) {
-      const safeName = receipt.name.replace(
-        /[^a-zA-Z0-9._-]/g,
-        "_"
+      const { data, error } = await supabase.rpc(
+        "create_restaurant_order",
+        {
+          p_customer_name: checkout.name.trim(),
+          p_customer_phone: checkout.phone.trim(),
+          p_delivery_address: { address: checkout.address.trim() },
+          p_items: items,
+          p_payment_method: checkout.method,
+          p_customer_note: checkout.note.trim() || null
+        }
       );
 
-      const path = `${user.id}/${orderId}/${Date.now()}-${safeName}`;
+      if (error) {
+        setMessage("Order could not be submitted: " + error.message);
+        return;
+      }
 
-      const upload = await supabase.storage
-        .from("payment-receipts")
-        .upload(path, receipt, { upsert: false });
+      const orderId =
+        typeof data === "string"
+          ? data
+          : data?.order_id || data?.id;
 
-      if (upload.error) {
-        receiptMessage =
-          " Your order was submitted, but receipt upload failed. Please contact the restaurant to provide proof of payment.";
-      } else {
-        const { error: paymentError } = await supabase
-          .from("payments")
-          .update({ receipt_url: path })
-          .eq("order_id", orderId);
+      if (!orderId) {
+        setMessage(
+          "The order could not be confirmed. Your bag has been kept. Please try again."
+        );
+        return;
+      }
 
-        if (paymentError) {
+      let receiptMessage = "";
+
+      if (checkout.method === "bank_transfer" && receipt) {
+        const safeName = receipt.name.replace(
+          /[^a-zA-Z0-9._-]/g,
+          "_"
+        );
+
+        const path = `${user.id}/${orderId}/${Date.now()}-${safeName}`;
+
+        const upload = await supabase.storage
+          .from("payment-receipts")
+          .upload(path, receipt, { upsert: false });
+
+        if (upload.error) {
           receiptMessage =
-            " Your order was submitted, but the receipt could not be linked to it. Please contact the restaurant.";
+            " Your order was submitted, but receipt upload failed. Please contact the restaurant to provide proof of payment.";
+        } else {
+          const { error: paymentError } = await supabase
+            .from("payments")
+            .update({ receipt_url: path })
+            .eq("order_id", orderId);
+
+          if (paymentError) {
+            receiptMessage =
+              " Your order was submitted, but the receipt could not be linked. Please contact the restaurant.";
+          }
         }
       }
+
+      setCart([]);
+      setReceipt(null);
+      await loadOrders();
+
+      setCartOpen(false);
+      setPage("account");
+
+      setMessage(
+        "Your order has been submitted successfully and is now Pending Approval. The restaurant must approve it before preparation." +
+          receiptMessage
+      );
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? "Something went wrong while submitting your order: " + error.message
+          : "Something went wrong while submitting your order. Please try again."
+      );
+    } finally {
+      setBusy(false);
     }
-
-    setCart([]);
-    setReceipt(null);
-    await loadOrders();
-
-    setBusy(false);
-    setCartOpen(false);
-    setPage("account");
-
-    setMessage(
-      "Your order has been submitted for restaurant approval." +
-      receiptMessage
-    );
   }
 
   async function updateStatus(id: string, status: string) {
@@ -352,6 +400,8 @@ export default function App() {
 
   async function signOut() {
     await supabase.auth.signOut();
+    setUser(null);
+    setIsAdmin(false);
     setPage("home");
     setMessage("You have signed out.");
   }
@@ -508,7 +558,7 @@ export default function App() {
         <main className="content-page narrow">
           <p className="eyebrow">YOUR GOLDEN CALABASH</p>
           <h1 className="page-title">
-            {user ? "Your account" : "Welcome back"}
+            {user ? "Your account" : "Welcome"}
           </h1>
 
           {!user ? (
@@ -568,7 +618,11 @@ export default function App() {
                 />
               </label>
 
-              <button className="gold-btn full" disabled={busy}>
+              <button
+                type="submit"
+                className="gold-btn full"
+                disabled={busy}
+              >
                 {busy
                   ? "Please wait…"
                   : authMode === "login"
@@ -705,12 +759,14 @@ export default function App() {
 
                       <div className="qty">
                         <button
+                          type="button"
                           onClick={() => changeQty(item.product.id, -1)}
                         >
                           <Minus size={14} />
                         </button>
                         <span>{item.quantity}</span>
                         <button
+                          type="button"
                           onClick={() => changeQty(item.product.id, 1)}
                         >
                           <Plus size={14} />
@@ -729,154 +785,196 @@ export default function App() {
                   <b>{money(total)}</b>
                 </div>
 
-                <form className="form checkout" onSubmit={placeOrder}>
-                  <h3>Delivery details</h3>
+                {!user ? (
+                  <div className="panel form">
+                    <h3>Account required</h3>
+                    <p>
+                      You can browse the menu and add food to your bag,
+                      but you must create an account or sign in before
+                      placing an order.
+                    </p>
 
-                  <label>
-                    Full name
-                    <input
-                      required
-                      value={checkout.name}
-                      onChange={e =>
-                        setCheckout({
-                          ...checkout,
-                          name: e.target.value
-                        })
-                      }
-                    />
-                  </label>
-
-                  <label>
-                    Phone number
-                    <input
-                      required
-                      value={checkout.phone}
-                      onChange={e =>
-                        setCheckout({
-                          ...checkout,
-                          phone: e.target.value
-                        })
-                      }
-                    />
-                  </label>
-
-                  <label>
-                    Delivery address
-                    <textarea
-                      required
-                      value={checkout.address}
-                      onChange={e =>
-                        setCheckout({
-                          ...checkout,
-                          address: e.target.value
-                        })
-                      }
-                    />
-                  </label>
-
-                  <label>
-                    Order note (optional)
-                    <textarea
-                      value={checkout.note}
-                      onChange={e =>
-                        setCheckout({
-                          ...checkout,
-                          note: e.target.value
-                        })
-                      }
-                    />
-                  </label>
-
-                  <label>
-                    Payment method
-                    <select
-                      value={checkout.method}
-                      onChange={e => {
-                        setCheckout({
-                          ...checkout,
-                          method: e.target.value
-                        });
-                        setReceipt(null);
+                    <button
+                      type="button"
+                      className="gold-btn full"
+                      onClick={() => {
+                        setAuthMode("signup");
+                        setCartOpen(false);
+                        setPage("account");
+                        setMessage("Create an account to continue with your order.");
                       }}
                     >
-                      <option value="cash_on_delivery">
-                        Cash on delivery
-                      </option>
-                      <option value="bank_transfer">
-                        Bank transfer
-                      </option>
-                    </select>
-                  </label>
+                      Create an account
+                    </button>
 
-                  {checkout.method === "bank_transfer" && (
-                    <div className="transfer-note">
-                      <h3>Make your bank transfer</h3>
-                      <p>
-                        Transfer the exact order amount to either of
-                        the accounts below. Your order will remain
-                        pending until the restaurant confirms payment.
-                      </p>
+                    <button
+                      type="button"
+                      className="outline-btn full"
+                      onClick={() => {
+                        setAuthMode("login");
+                        setCartOpen(false);
+                        setPage("account");
+                        setMessage("Sign in to continue with your order.");
+                      }}
+                    >
+                      I already have an account
+                    </button>
+                  </div>
+                ) : (
+                  <form className="form checkout" onSubmit={placeOrder}>
+                    <h3>Delivery details</h3>
 
-                      {BANK_ACCOUNTS.map(account => (
-                        <div
-                          className="panel"
-                          key={account.accountNumber}
-                        >
-                          <b>{account.bank}</b>
-                          <p>Account name: {account.accountName}</p>
-                          <p>
-                            Account number:{" "}
-                            <strong>{account.accountNumber}</strong>
-                          </p>
-                          <button
-                            type="button"
-                            className="outline-btn"
-                            onClick={() =>
-                              copyAccount(account.accountNumber)
-                            }
+                    <label>
+                      Full name
+                      <input
+                        required
+                        value={checkout.name}
+                        onChange={e =>
+                          setCheckout({
+                            ...checkout,
+                            name: e.target.value
+                          })
+                        }
+                      />
+                    </label>
+
+                    <label>
+                      Phone number
+                      <input
+                        required
+                        type="tel"
+                        value={checkout.phone}
+                        onChange={e =>
+                          setCheckout({
+                            ...checkout,
+                            phone: e.target.value
+                          })
+                        }
+                      />
+                    </label>
+
+                    <label>
+                      Delivery address
+                      <textarea
+                        required
+                        value={checkout.address}
+                        onChange={e =>
+                          setCheckout({
+                            ...checkout,
+                            address: e.target.value
+                          })
+                        }
+                      />
+                    </label>
+
+                    <label>
+                      Order note (optional)
+                      <textarea
+                        value={checkout.note}
+                        onChange={e =>
+                          setCheckout({
+                            ...checkout,
+                            note: e.target.value
+                          })
+                        }
+                      />
+                    </label>
+
+                    <label>
+                      Payment method
+                      <select
+                        value={checkout.method}
+                        onChange={e => {
+                          setCheckout({
+                            ...checkout,
+                            method: e.target.value
+                          });
+                          setReceipt(null);
+                        }}
+                      >
+                        <option value="cash_on_delivery">
+                          Cash on delivery
+                        </option>
+                        <option value="bank_transfer">
+                          Bank transfer
+                        </option>
+                      </select>
+                    </label>
+
+                    {checkout.method === "bank_transfer" && (
+                      <div className="transfer-note">
+                        <h3>Make your bank transfer</h3>
+                        <p>
+                          Transfer the exact order amount to either of
+                          the accounts below. Your order will remain
+                          pending until the restaurant confirms payment.
+                        </p>
+
+                        {BANK_ACCOUNTS.map(account => (
+                          <div
+                            className="panel"
+                            key={account.accountNumber}
                           >
-                            {copiedAccount === account.accountNumber ? (
-                              <>
-                                <Check size={15} /> Copied
-                              </>
-                            ) : (
-                              <>
-                                <Copy size={15} /> Copy account number
-                              </>
-                            )}
-                          </button>
-                        </div>
-                      ))}
+                            <b>{account.bank}</b>
+                            <p>Account name: {account.accountName}</p>
+                            <p>
+                              Account number:{" "}
+                              <strong>{account.accountNumber}</strong>
+                            </p>
+                            <button
+                              type="button"
+                              className="outline-btn"
+                              onClick={() =>
+                                copyAccount(account.accountNumber)
+                              }
+                            >
+                              {copiedAccount === account.accountNumber ? (
+                                <>
+                                  <Check size={15} /> Copied
+                                </>
+                              ) : (
+                                <>
+                                  <Copy size={15} /> Copy account number
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        ))}
 
-                      <p>
-                        <b>Amount to transfer: {money(total)}</b>
-                      </p>
+                        <p>
+                          <b>Amount to transfer: {money(total)}</b>
+                        </p>
 
-                      <label>
-                        Upload transfer receipt (optional)
-                        <input
-                          type="file"
-                          accept="image/*,.pdf"
-                          onChange={e =>
-                            setReceipt(e.target.files?.[0] || null)
-                          }
-                        />
-                      </label>
-                    </div>
-                  )}
+                        <label>
+                          Upload transfer receipt (optional)
+                          <input
+                            type="file"
+                            accept="image/*,.pdf"
+                            onChange={e =>
+                              setReceipt(e.target.files?.[0] || null)
+                            }
+                          />
+                        </label>
+                      </div>
+                    )}
 
-                  <button className="gold-btn full" disabled={busy}>
-                    {busy
-                      ? "Submitting…"
-                      : `Place order · ${money(total)}`}
-                  </button>
+                    <button
+                      type="submit"
+                      className="gold-btn full"
+                      disabled={busy}
+                    >
+                      {busy
+                        ? "Submitting…"
+                        : `Place order · ${money(total)}`}
+                    </button>
 
-                  <small>
-                    Your order must be approved by the restaurant before
-                    preparation. Bank transfers must be verified by
-                    the restaurant before being marked as paid.
-                  </small>
-                </form>
+                    <small>
+                      Your order must be approved by the restaurant before
+                      preparation. Bank transfers must be verified by
+                      the restaurant before being marked as paid.
+                    </small>
+                  </form>
+                )}
               </>
             )}
           </aside>
