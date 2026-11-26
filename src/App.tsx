@@ -386,19 +386,6 @@ export default function App() {
     }
   }
 
-  async function updateStatus(id: string, status: string) {
-    const { error } = await supabase
-      .from("orders")
-      .update({ order_status: status })
-      .eq("id", id);
-
-    setMessage(
-      error?.message || "Order status updated successfully."
-    );
-
-    await loadOrders();
-  }
-
   async function signOut() {
     await supabase.auth.signOut();
     setUser(null);
