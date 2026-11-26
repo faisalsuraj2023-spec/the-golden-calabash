@@ -11,7 +11,9 @@ import {
   X,
   ShieldCheck,
   ClipboardList,
-  ChefHat
+  ChefHat,
+  Copy,
+  Check
 } from "lucide-react";
 
 type Product = {
@@ -31,11 +33,25 @@ type CartItem = {
 
 type Order = {
   id: string;
-  status: string;
-  total_amount: number;
+  order_status: string;
+  total: number;
   created_at: string;
   payment_method?: string;
+  customer_name?: string;
 };
+
+const BANK_ACCOUNTS = [
+  {
+    bank: "United Bank for Africa (UBA)",
+    accountNumber: "2364670378",
+    accountName: "Faisal Yusuf Suraj"
+  },
+  {
+    bank: "Opay",
+    accountNumber: "9112809021",
+    accountName: "Faisal Yusuf Suraj"
+  }
+];
 
 const money = (n: number) =>
   new Intl.NumberFormat("en-NG", {
@@ -55,11 +71,13 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [copiedAccount, setCopiedAccount] = useState("");
   const [auth, setAuth] = useState({
     name: "",
     email: "",
     password: ""
   });
+
   const [checkout, setCheckout] = useState({
     name: "",
     phone: "",
@@ -67,6 +85,7 @@ export default function App() {
     note: "",
     method: "cash_on_delivery"
   });
+
   const [receipt, setReceipt] = useState<File | null>(null);
 
   useEffect(() => {
@@ -104,12 +123,17 @@ export default function App() {
       .eq("is_available", true)
       .order("created_at", { ascending: false });
 
-    if (!error && data) {
-      setProducts(data as Product[]);
+    if (error) {
+      setMessage("Could not load the food menu: " + error.message);
+      return;
     }
+
+    if (data) setProducts(data as Product[]);
   }
 
   async function checkAdmin() {
+    if (!user) return;
+
     const { data } = await supabase
       .from("user_roles")
       .select("role")
@@ -121,15 +145,18 @@ export default function App() {
   }
 
   async function loadOrders() {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("orders")
-      .select("id,status,total_amount,created_at,payment_method")
+      .select("id,order_status,total,created_at,payment_method,customer_name")
       .order("created_at", { ascending: false })
       .limit(30);
 
-    if (data) {
-      setOrders(data as Order[]);
+    if (error) {
+      console.error("Could not load orders:", error.message);
+      return;
     }
+
+    if (data) setOrders(data as Order[]);
   }
 
   function add(product: Product) {
@@ -144,6 +171,8 @@ export default function App() {
           )
         : [...old, { product, quantity: 1 }];
     });
+
+    setMessage(product.name + " added to your bag.");
   }
 
   function changeQty(id: string, delta: number) {
@@ -161,11 +190,26 @@ export default function App() {
   const total = useMemo(
     () =>
       cart.reduce(
-        (s, i) => s + Number(i.product.price) * i.quantity,
+        (sum, item) =>
+          sum + Number(item.product.price) * item.quantity,
         0
       ),
     [cart]
   );
+
+  async function copyAccount(number: string) {
+    try {
+      await navigator.clipboard.writeText(number);
+      setCopiedAccount(number);
+      setMessage("Account number copied successfully.");
+
+      window.setTimeout(() => {
+        setCopiedAccount("");
+      }, 2500);
+    } catch {
+      setMessage("Copy was not available. Please copy the number manually.");
+    }
+  }
 
   async function submitAuth(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -178,7 +222,8 @@ export default function App() {
             email: auth.email,
             password: auth.password,
             options: {
-              data: { full_name: auth.name }
+              data: { full_name: auth.name },
+              emailRedirectTo: `${window.location.origin}/`
             }
           })
         : await supabase.auth.signInWithPassword({
@@ -188,14 +233,17 @@ export default function App() {
 
     setBusy(false);
 
-    setMessage(
-      result.error?.message ||
-        (authMode === "signup"
-          ? "Account created. Check your email if confirmation is enabled."
-          : "Signed in successfully.")
-    );
+    if (result.error) {
+      setMessage(result.error.message);
+      return;
+    }
 
-    if (!result.error && authMode === "login") {
+    if (authMode === "signup") {
+      setMessage(
+        "Account created. Please check your email for the confirmation link."
+      );
+    } else {
+      setMessage("Signed in successfully.");
       setPage("account");
     }
   }
@@ -209,14 +257,17 @@ export default function App() {
       return;
     }
 
-    if (!cart.length) return;
+    if (!cart.length) {
+      setMessage("Your bag is empty.");
+      return;
+    }
 
     setBusy(true);
     setMessage("");
 
-    const items = cart.map(i => ({
-      product_id: i.product.id,
-      quantity: i.quantity
+    const items = cart.map(item => ({
+      product_id: item.product.id,
+      quantity: item.quantity
     }));
 
     const { data, error } = await supabase.rpc(
@@ -232,7 +283,7 @@ export default function App() {
     );
 
     if (error) {
-      setMessage(error.message);
+      setMessage("Order could not be submitted: " + error.message);
       setBusy(false);
       return;
     }
@@ -242,53 +293,67 @@ export default function App() {
         ? data
         : data?.order_id || data?.id;
 
+    let receiptMessage = "";
+
     if (checkout.method === "bank_transfer" && receipt && orderId) {
-      const path = `${user.id}/${orderId}/${Date.now()}-${receipt.name.replace(
+      const safeName = receipt.name.replace(
         /[^a-zA-Z0-9._-]/g,
         "_"
-      )}`;
+      );
+
+      const path = `${user.id}/${orderId}/${Date.now()}-${safeName}`;
 
       const upload = await supabase.storage
         .from("payment-receipts")
         .upload(path, receipt, { upsert: false });
 
-      if (!upload.error) {
-        await supabase
-          .from("payments")
-          .update({ receipt_path: path })
-          .eq("order_id", orderId);
+      if (upload.error) {
+        receiptMessage =
+          " Your order was submitted, but receipt upload failed. Please contact the restaurant to provide proof of payment.";
       } else {
-        setMessage(
-          "Order placed, but receipt upload failed. Open your order and try again or contact the restaurant."
-        );
+        const { error: paymentError } = await supabase
+          .from("payments")
+          .update({ receipt_url: path })
+          .eq("order_id", orderId);
+
+        if (paymentError) {
+          receiptMessage =
+            " Your order was submitted, but the receipt could not be linked to it. Please contact the restaurant.";
+        }
       }
     }
 
     setCart([]);
+    setReceipt(null);
     await loadOrders();
+
     setBusy(false);
-
-    setMessage(
-      "Your order has been submitted for restaurant approval. You can track it in your account."
-    );
-
     setCartOpen(false);
     setPage("account");
+
+    setMessage(
+      "Your order has been submitted for restaurant approval." +
+      receiptMessage
+    );
   }
 
   async function updateStatus(id: string, status: string) {
     const { error } = await supabase
       .from("orders")
-      .update({ status })
+      .update({ order_status: status })
       .eq("id", id);
 
-    setMessage(error?.message || "Order status updated.");
-    loadOrders();
+    setMessage(
+      error?.message || "Order status updated successfully."
+    );
+
+    await loadOrders();
   }
 
   async function signOut() {
     await supabase.auth.signOut();
     setPage("home");
+    setMessage("You have signed out.");
   }
 
   return (
@@ -297,7 +362,10 @@ export default function App() {
         <a
           className="brand"
           href="#"
-          onClick={() => setPage("home")}
+          onClick={e => {
+            e.preventDefault();
+            setPage("home");
+          }}
         >
           <span className="brand-mark">G</span>
           <span>
@@ -324,7 +392,7 @@ export default function App() {
           >
             <ShoppingBag size={19} />
             <span className="count">
-              {cart.reduce((s, i) => s + i.quantity, 0)}
+              {cart.reduce((sum, item) => sum + item.quantity, 0)}
             </span>
           </button>
 
@@ -349,8 +417,8 @@ export default function App() {
 
       {!supabaseReady && (
         <div className="notice">
-          Connect your Supabase project by adding the two VITE variables
-          in your .env file. See README.md.
+          Connect your Supabase project by adding the required VITE
+          variables in your environment settings.
         </div>
       )}
 
@@ -522,8 +590,8 @@ export default function App() {
               <h2 className="section-heading">Your recent orders</h2>
 
               {orders.length ? (
-                orders.map(o => (
-                  <OrderCard key={o.id} order={o} />
+                orders.map(order => (
+                  <OrderCard key={order.id} order={order} />
                 ))
               ) : (
                 <p className="muted">
@@ -563,34 +631,37 @@ export default function App() {
 
               <h2 className="section-heading">Order management</h2>
 
-              {orders.map(o => (
-                <div className="panel admin-order" key={o.id}>
+              {orders.map(order => (
+                <div className="panel admin-order" key={order.id}>
                   <div>
-                    <b>#{o.id.slice(0, 8)}</b>
+                    <b>#{order.id.slice(0, 8)}</b>
+                    <p>{order.customer_name || "Customer"}</p>
                     <p>
-                      {money(o.total_amount)} ·{" "}
-                      {o.payment_method?.replace(/_/g, " ")}
+                      {money(Number(order.total))} ·{" "}
+                      {order.payment_method?.replace(/_/g, " ")}
                     </p>
-                    <span className="status">{o.status}</span>
+                    <span className="status">
+                      {order.order_status?.replace(/_/g, " ")}
+                    </span>
                   </div>
 
                   <div className="status-actions">
-                    <button onClick={() => updateStatus(o.id, "approved")}>
+                    <button onClick={() => updateStatus(order.id, "approved")}>
                       Approve
                     </button>
-                    <button onClick={() => updateStatus(o.id, "preparing")}>
+                    <button onClick={() => updateStatus(order.id, "preparing")}>
                       Preparing
                     </button>
-                    <button onClick={() => updateStatus(o.id, "ready")}>
+                    <button onClick={() => updateStatus(order.id, "ready")}>
                       Ready
                     </button>
-                    <button onClick={() => updateStatus(o.id, "out_for_delivery")}>
+                    <button onClick={() => updateStatus(order.id, "out_for_delivery")}>
                       Dispatch
                     </button>
-                    <button onClick={() => updateStatus(o.id, "delivered")}>
+                    <button onClick={() => updateStatus(order.id, "delivered")}>
                       Delivered
                     </button>
-                    <button onClick={() => updateStatus(o.id, "rejected")}>
+                    <button onClick={() => updateStatus(order.id, "rejected")}>
                       Reject
                     </button>
                   </div>
@@ -626,21 +697,21 @@ export default function App() {
               </p>
             ) : (
               <>
-                {cart.map(i => (
-                  <div className="cart-row" key={i.product.id}>
+                {cart.map(item => (
+                  <div className="cart-row" key={item.product.id}>
                     <div>
-                      <b>{i.product.name}</b>
-                      <p>{money(Number(i.product.price))}</p>
+                      <b>{item.product.name}</b>
+                      <p>{money(Number(item.product.price))}</p>
 
                       <div className="qty">
                         <button
-                          onClick={() => changeQty(i.product.id, -1)}
+                          onClick={() => changeQty(item.product.id, -1)}
                         >
                           <Minus size={14} />
                         </button>
-                        <span>{i.quantity}</span>
+                        <span>{item.quantity}</span>
                         <button
-                          onClick={() => changeQty(i.product.id, 1)}
+                          onClick={() => changeQty(item.product.id, 1)}
                         >
                           <Plus size={14} />
                         </button>
@@ -648,7 +719,7 @@ export default function App() {
                     </div>
 
                     <b>
-                      {money(Number(i.product.price) * i.quantity)}
+                      {money(Number(item.product.price) * item.quantity)}
                     </b>
                   </div>
                 ))}
@@ -658,10 +729,7 @@ export default function App() {
                   <b>{money(total)}</b>
                 </div>
 
-                <form
-                  className="form checkout"
-                  onSubmit={placeOrder}
-                >
+                <form className="form checkout" onSubmit={placeOrder}>
                   <h3>Delivery details</h3>
 
                   <label>
@@ -723,12 +791,13 @@ export default function App() {
                     Payment method
                     <select
                       value={checkout.method}
-                      onChange={e =>
+                      onChange={e => {
                         setCheckout({
                           ...checkout,
                           method: e.target.value
-                        })
-                      }
+                        });
+                        setReceipt(null);
+                      }}
                     >
                       <option value="cash_on_delivery">
                         Cash on delivery
@@ -741,15 +810,50 @@ export default function App() {
 
                   {checkout.method === "bank_transfer" && (
                     <div className="transfer-note">
-                      <b>Bank transfer</b>
+                      <h3>Make your bank transfer</h3>
                       <p>
-                        Verified business bank details will be shown here
-                        once the restaurant owner adds them in settings.
-                        Do not transfer to an unverified account.
+                        Transfer the exact order amount to either of
+                        the accounts below. Your order will remain
+                        pending until the restaurant confirms payment.
+                      </p>
+
+                      {BANK_ACCOUNTS.map(account => (
+                        <div
+                          className="panel"
+                          key={account.accountNumber}
+                        >
+                          <b>{account.bank}</b>
+                          <p>Account name: {account.accountName}</p>
+                          <p>
+                            Account number:{" "}
+                            <strong>{account.accountNumber}</strong>
+                          </p>
+                          <button
+                            type="button"
+                            className="outline-btn"
+                            onClick={() =>
+                              copyAccount(account.accountNumber)
+                            }
+                          >
+                            {copiedAccount === account.accountNumber ? (
+                              <>
+                                <Check size={15} /> Copied
+                              </>
+                            ) : (
+                              <>
+                                <Copy size={15} /> Copy account number
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      ))}
+
+                      <p>
+                        <b>Amount to transfer: {money(total)}</b>
                       </p>
 
                       <label>
-                        Upload transfer receipt
+                        Upload transfer receipt (optional)
                         <input
                           type="file"
                           accept="image/*,.pdf"
@@ -769,7 +873,8 @@ export default function App() {
 
                   <small>
                     Your order must be approved by the restaurant before
-                    preparation.
+                    preparation. Bank transfers must be verified by
+                    the restaurant before being marked as paid.
                   </small>
                 </form>
               </>
@@ -815,11 +920,11 @@ function MenuGrid({
 
   return (
     <div className="menu-grid">
-      {products.map(p => (
-        <article className="food-card" key={p.id}>
+      {products.map(product => (
+        <article className="food-card" key={product.id}>
           <div className="food-image">
-            {p.image_url ? (
-              <img src={p.image_url} alt={p.name} />
+            {product.image_url ? (
+              <img src={product.image_url} alt={product.name} />
             ) : (
               <div className="food-placeholder">
                 <Utensils size={34} />
@@ -830,15 +935,17 @@ function MenuGrid({
 
           <div className="food-info">
             <div>
-              <h3>{p.name}</h3>
-              <p>{p.description || "Prepared fresh with care."}</p>
+              <h3>{product.name}</h3>
+              <p>
+                {product.description || "Prepared fresh with care."}
+              </p>
             </div>
 
             <div className="food-bottom">
-              <b>{money(Number(p.price))}</b>
+              <b>{money(Number(product.price))}</b>
               <button
-                onClick={() => add(p)}
-                aria-label={`Add ${p.name}`}
+                onClick={() => add(product)}
+                aria-label={`Add ${product.name}`}
               >
                 <Plus size={17} />
               </button>
@@ -859,9 +966,9 @@ function OrderCard({ order }: { order: Order }) {
       </div>
 
       <div className="order-right">
-        <b>{money(order.total_amount)}</b>
+        <b>{money(Number(order.total))}</b>
         <span className="status">
-          {order.status.replace(/_/g, " ")}
+          {order.order_status.replace(/_/g, " ")}
         </span>
       </div>
     </div>
