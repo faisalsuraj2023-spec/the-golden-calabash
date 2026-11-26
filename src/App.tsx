@@ -37,6 +37,7 @@ type Order = {
   order_status: string;
   total: number;
   created_at: string;
+  updated_at?: string;
   payment_method?: string;
   customer_name?: string;
 };
@@ -117,6 +118,31 @@ export default function App() {
     }
   }, [user]);
 
+  // Keep the customer's order cards in sync as the restaurant updates delivery progress.
+  useEffect(() => {
+    if (!user) return;
+
+    const channel = supabase
+      .channel("customer-order-status-" + user.id)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "orders",
+          filter: "user_id=eq." + user.id
+        },
+        () => {
+          void loadOrders();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [user]);
+
   async function loadProducts() {
     const { data, error } = await supabase
       .from("products")
@@ -148,7 +174,7 @@ export default function App() {
   async function loadOrders() {
     const { data, error } = await supabase
       .from("orders")
-      .select("id,order_status,total,created_at,payment_method,customer_name")
+      .select("id,order_status,total,created_at,updated_at,payment_method,customer_name")
       .order("created_at", { ascending: false })
       .limit(30);
 
@@ -989,18 +1015,62 @@ function MenuGrid({
 }
 
 function OrderCard({ order }: { order: Order }) {
+  const steps = [
+    { key: "pending_approval", label: "Order placed", detail: "Your order has been received." },
+    { key: "approved", label: "Confirmed", detail: "The restaurant has approved your order." },
+    { key: "preparing", label: "Preparing", detail: "Your meal is being prepared." },
+    { key: "ready", label: "Ready", detail: "Your order is ready for dispatch." },
+    { key: "out_for_delivery", label: "On the way", detail: "Your order is out for delivery." },
+    { key: "delivered", label: "Delivered", detail: "Your order has been delivered. Enjoy your meal!" }
+  ];
+  const currentIndex = steps.findIndex(step => step.key === order.order_status);
+  const isStopped = order.order_status === "rejected" || order.order_status === "cancelled";
+  const currentStep = currentIndex >= 0 ? steps[currentIndex] : null;
+
   return (
-    <div className="panel order-card">
-      <div>
-        <b>Order #{order.id.slice(0, 8)}</b>
-        <p>{new Date(order.created_at).toLocaleString()}</p>
+    <div className="panel order-card customer-tracking-card">
+      <div className="customer-tracking-head">
+        <div>
+          <b>Order #{order.id.slice(0, 8)}</b>
+          <p>Placed {new Date(order.created_at).toLocaleString()}</p>
+        </div>
+        <div className="order-right">
+          <b>{money(Number(order.total))}</b>
+          <span className={"status " + (isStopped ? "tracking-stopped" : "tracking-current")}>
+            {order.order_status.replace(/_/g, " ")}
+          </span>
+        </div>
       </div>
 
-      <div className="order-right">
-        <b>{money(Number(order.total))}</b>
-        <span className="status">
-          {order.order_status.replace(/_/g, " ")}
-        </span>
+      <div className="tracking-panel">
+        <div className="tracking-title-row">
+          <b>Delivery progress</b>
+          <span className="tracking-live-label"><span /> LIVE STATUS</span>
+        </div>
+        {isStopped ? (
+          <div className="tracking-stopped-message">
+            This order has been {order.order_status}. Please contact the restaurant if you need help.
+          </div>
+        ) : (
+          <>
+            <div className="tracking-steps">
+              {steps.map((step, index) => (
+                <div className={"tracking-step " + (index < currentIndex ? "complete" : "") + (index === currentIndex ? " current" : "")} key={step.key}>
+                  <span className="tracking-dot">{index < currentIndex ? "✓" : index + 1}</span>
+                  <span className="tracking-step-label">{step.label}</span>
+                </div>
+              ))}
+            </div>
+            <p className="tracking-current-detail">
+              <b>{currentStep?.label || "Order received"}</b>
+              <span>{currentStep?.detail || "The restaurant is checking your order."}</span>
+            </p>
+          </>
+        )}
+        {order.updated_at && (
+          <p className="tracking-updated">Last updated: {new Date(order.updated_at).toLocaleString()}</p>
+        )}
+        <p className="tracking-live-help">This status updates automatically when the restaurant changes your order. No GPS tracking is used.</p>
       </div>
     </div>
   );
